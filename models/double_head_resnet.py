@@ -12,7 +12,6 @@ from torch.hub import load_state_dict_from_url
 from typing import Type, Any, Callable, Union, List, Optional
 from torch import Tensor
 
-from .position_encoding import build_position_encoding
 
 __all__ = ['ResNet', 'resnet50']
 
@@ -277,16 +276,46 @@ model_dict = {
     'resnet50': [resnet50, 2048],
 }
 
+class Joiner(nn.Sequential):
+    def __init__(self, backbone, position_embedding, args=None):
+        super().__init__(backbone, position_embedding)
+        # self.args = args
+        if args is not None and 'interpotaion' in vars(args) and args.interpotaion:
+            self.interpotaion = True
+        else:
+            self.interpotaion = False
+
+
+    def forward(self, input: Tensor):
+        xs = self[0](input)
+        out: List[Tensor] = []
+        pos = []
+        if isinstance(xs, dict):
+            for name, x in xs.items():
+                out.append(x)
+                # position encoding
+                pos.append(self[1](x).to(x.dtype))
+        else:
+            # for swin Transformer
+            out.append(xs)
+            pos.append(self[1](xs).to(xs.dtype))
+        return out, pos
+
+from models.query2label import build_q2l        
+from models.parser_testing import get_args
 
 class Double_Head_ResNet(nn.Module):
     """backbone + projection head"""
-    def __init__(self, args, name='resnet50', proj_head='mlp', feat_dim=128):
+    def __init__(self, name='resnet50', head='linear', feat_dim=128):
         super(Double_Head_ResNet, self).__init__()
-        model_fun, dim_in = model_dict[name]
-        self.encoder = model_fun()
-        if proj_head == 'linear':
+        
+        self.model = build_q2l(get_args())
+        self.backbone = self.model.backbone
+        dim_in = 2048
+
+        if head == 'linear':
             self.proj_head = nn.Linear(dim_in, feat_dim)
-        elif proj_head == 'mlp':
+        elif head == 'mlp':
             self.proj_head = nn.Sequential(
                 nn.Linear(dim_in, dim_in),
                 nn.ReLU(inplace=True),
@@ -294,11 +323,8 @@ class Double_Head_ResNet(nn.Module):
             )
         else:
             raise NotImplementedError(
-                'head not supported: {}'.format(proj_head))
-        
-        self.position_encoding = build_position_encoding(args)
-        self.transformer_head = 
-
+                'head not supported: {}'.format(head))
+        self.transformer_head = self.model.transformer
     def forward(self, x):
         feat = self.encoder(x)
         feat = F.normalize(self.proj_head(feat), dim=1)
@@ -314,3 +340,72 @@ class LinearClassifier(nn.Module):
 
     def forward(self, features):
         return self.fc(features)
+
+class Qeruy2Label(nn.Module):
+    def __init__(self, backbone, transfomer, num_class):
+        """[summary]
+    
+        Args:
+            backbone ([type]): backbone model.
+            transfomer ([type]): transformer model.
+            num_class ([type]): number of classes. (80 for MSCOCO).
+        """
+        super().__init__()
+        self.backbone = backbone
+        self.transformer = transfomer
+        self.num_class = num_class
+
+        # assert not (self.ada_fc and self.emb_fc), "ada_fc and emb_fc cannot be True at the same time."
+        
+        hidden_dim = transfomer.d_model
+        self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
+        self.query_embed = nn.Embedding(num_class, hidden_dim)
+        self.fc = GroupWiseLinear(num_class, hidden_dim, bias=True)
+
+        self.proj_head = nn.Sequential(
+                nn.Linear(dim_in, dim_in),
+                nn.ReLU(inplace=True),
+                nn.Linear(dim_in, feat_dim)
+            )
+
+        print("\nParams from backbone Query2Lbael need to update:")
+        for name, param in self.backbone.named_parameters():
+            if param.requires_grad == True:
+                print("\t", name)
+        print("\n\n")
+        # exit()
+
+
+    def forward(self, input):
+        src, pos = self.backbone(input)
+        print(f"src.shape:{src.shape}")
+        src, pos = src[-1], pos[-1]
+        # import ipdb; ipdb.set_trace()
+
+        query_input = self.query_embed.weight
+        hs = self.transformer(self.input_proj(src), query_input, pos)[0] # B,K,d
+        out = self.fc(hs[-1])
+        # import ipdb; ipdb.set_trace()
+        return out
+
+    def finetune_paras(self):
+        from itertools import chain
+        return chain(self.transformer.parameters(), self.fc.parameters(), self.input_proj.parameters(), self.query_embed.parameters())
+
+    def load_backbone(self, path):
+        print("=> loading checkpoint '{}'".format(path))
+        checkpoint = torch.load(path, map_location=torch.device(dist.get_rank()))
+        # import ipdb; ipdb.set_trace()
+        self.backbone[0].body.load_state_dict(clean_state_dict(checkpoint['state_dict']), strict=False)
+        print("=> loaded checkpoint '{}' (epoch {})"
+                  .format(path, checkpoint['epoch']))
+
+
+
+if __name__ == "__main__":
+    double_head_model = Double_Head_ResNet()
+    print("Params from transformer need to update:")
+    for name, param in double_head_model.named_parameters():
+        if param.requires_grad == True:
+            print("\t", name)
+
