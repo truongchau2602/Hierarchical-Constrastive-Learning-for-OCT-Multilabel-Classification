@@ -3,7 +3,7 @@ ImageNet-Style ResNet
 [1] Kaiming He, Xiangyu Zhang, Shaoqing Ren, Jian Sun
     Deep Residual Learning for Image Recognition. arXiv:1512.03385
 Adapted from: https://github.com/bearpaw/pytorch-classification
-Modified by ctruongvinhhoang1@gmail.com
+Modified by shu.zhang@salesforce.com
 """
 import torch
 import torch.nn as nn
@@ -12,7 +12,6 @@ from torch.hub import load_state_dict_from_url
 from typing import Type, Any, Callable, Union, List, Optional
 from torch import Tensor
 
-from .position_encoding import build_position_encoding
 
 __all__ = ['ResNet', 'resnet50']
 
@@ -278,30 +277,27 @@ model_dict = {
 }
 
 
-class Double_Head_ResNet(nn.Module):
+class MyResNet(nn.Module):
     """backbone + projection head"""
-    def __init__(self, args, name='resnet50', proj_head='mlp', feat_dim=128):
-        super(Double_Head_ResNet, self).__init__()
+    def __init__(self, name='resnet50', head='mlp', feat_dim=128):
+        super(MyResNet, self).__init__()
         model_fun, dim_in = model_dict[name]
         self.encoder = model_fun()
-        if proj_head == 'linear':
-            self.proj_head = nn.Linear(dim_in, feat_dim)
-        elif proj_head == 'mlp':
-            self.proj_head = nn.Sequential(
+        if head == 'linear':
+            self.head = nn.Linear(dim_in, feat_dim)
+        elif head == 'mlp':
+            self.head = nn.Sequential(
                 nn.Linear(dim_in, dim_in),
                 nn.ReLU(inplace=True),
                 nn.Linear(dim_in, feat_dim)
             )
         else:
             raise NotImplementedError(
-                'head not supported: {}'.format(proj_head))
-        
-        self.position_encoding = build_position_encoding(args)
-        self.transformer_head = 
+                'head not supported: {}'.format(head))
 
     def forward(self, x):
         feat = self.encoder(x)
-        feat = F.normalize(self.proj_head(feat), dim=1)
+        feat = F.normalize(self.head(feat), dim=1)
         return feat
 
 
